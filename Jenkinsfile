@@ -43,6 +43,8 @@ pipeline {
           python3 --version
           jq --version
           chmod +x aws_ami_backup_V2.sh aws_ami_cleanup_V2.sh
+          echo "Workspace contents:"
+          ls -l
         '''
       }
     }
@@ -54,7 +56,7 @@ pipeline {
       steps {
         withAWS(credentials: 'aws-cicd-creds', region: params.REGION) {
           sh """
-            ./aws_ami_backup_V2.sh ami_config.txt ${params.MODE}
+            ./aws_ami_backup_V2.sh serverlist.txt ${params.MODE}
           """
         }
       }
@@ -83,4 +85,3 @@ pipeline {
     }
   }
 }
-
