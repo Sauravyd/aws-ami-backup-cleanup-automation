@@ -55,6 +55,10 @@ pipeline {
       }
       steps {
         withAWS(credentials: 'aws-cicd-creds', region: params.REGION) {
+
+          // 🔍 TEMP DEBUG — confirms AWS account used by Jenkins
+          sh 'aws sts get-caller-identity'
+
           sh """
             ./aws_ami_backup_V2.sh serverlist.txt ${params.MODE}
           """
