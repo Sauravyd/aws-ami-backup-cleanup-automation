@@ -49,16 +49,31 @@ pipeline {
       }
     }
 
+    // 🔐 APPROVAL GATE (ONLY FOR RUN MODE)
+    stage('Approval') {
+      when {
+        expression { params.MODE == 'run' }
+      }
+      steps {
+        input message: """
+        ⚠️ MANUAL APPROVAL REQUIRED ⚠️
+
+        Action : ${params.ACTION}
+        Mode   : ${params.MODE}
+        Region : ${params.REGION}
+
+        This operation will MODIFY AWS resources.
+        Do you want to proceed?
+        """
+      }
+    }
+
     stage('AMI Backup') {
       when {
         expression { params.ACTION == 'backup' }
       }
       steps {
         withAWS(credentials: 'aws-cicd-creds', region: params.REGION) {
-
-          // 🔍 TEMP DEBUG — confirms AWS account used by Jenkins
-          sh 'aws sts get-caller-identity'
-
           sh """
             ./aws_ami_backup_V2.sh serverlist.txt ${params.MODE}
           """
