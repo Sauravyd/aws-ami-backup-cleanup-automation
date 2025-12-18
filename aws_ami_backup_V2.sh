@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# create_ami_v2.sh – Hardened AWS AMI Automation
+# create_ami_v2.sh – Hardened AWS AMI Automation (WITH STATUS VALIDATION)
 # ==============================================================================
 # Config format:
 # AccountId , Region , EC2_InstanceId , RetentionDays , BackupReason
@@ -9,7 +9,7 @@
 # instance_name-BackupReason-DD-MM-YYYY-HHMM-automated-ami
 #
 # Modes:
-#   dry-run (default)
+#   dry-run
 #   run
 # ==============================================================================
 
@@ -20,6 +20,10 @@ MODE="${2:-dry-run}"
 
 DATE_TAG="$(date +%d-%m-%Y)"
 TIME_TAG="$(date +%H%M)"
+
+# ---------------- AMI WAIT CONFIG ----------------
+AMI_POLL_INTERVAL=30          # seconds
+AMI_MAX_WAIT_TIME=3600        # 1 hour max wait
 
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
@@ -36,6 +40,50 @@ echo "====================================================="
 
 trim() { echo "$1" | xargs; }
 
+# ---------------- AMI WAIT FUNCTION ----------------
+wait_for_ami() {
+  local ami_id="$1"
+  local region="$2"
+
+  local waited=0
+
+  echo "⏳ Waiting for AMI to become AVAILABLE: $ami_id"
+
+  while true; do
+    state="$(aws ec2 describe-images \
+      --image-ids "$ami_id" \
+      --region "$region" \
+      --query 'Images[0].State' \
+      --output text 2>/dev/null || echo unknown)"
+
+    case "$state" in
+      available)
+        echo "✅ AMI is AVAILABLE: $ami_id"
+        return 0
+        ;;
+      failed)
+        echo "❌ AMI creation FAILED: $ami_id"
+        return 1
+        ;;
+      pending)
+        echo "⏳ AMI still pending... (${waited}s elapsed)"
+        ;;
+      *)
+        echo "⚠️ Unknown AMI state '$state' for $ami_id"
+        ;;
+    esac
+
+    if (( waited >= AMI_MAX_WAIT_TIME )); then
+      echo "❌ Timeout waiting for AMI $ami_id after ${AMI_MAX_WAIT_TIME}s"
+      return 1
+    fi
+
+    sleep "$AMI_POLL_INTERVAL"
+    waited=$((waited + AMI_POLL_INTERVAL))
+  done
+}
+
+# ---------------- VALIDATIONS ----------------
 [[ -f "$CONFIG_FILE" ]] || { echo "❌ Config file not found"; exit 1; }
 
 CURRENT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
@@ -59,19 +107,21 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
   echo "-----------------------------------------------------"
   echo "Processing line $LINE_NO → $INSTANCE_ID ($REGION)"
 
-  # ---------------- Validations ----------------
-  [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "❌ Invalid AccountId"; continue; }
-  [[ "$ACCOUNT_ID" == "$CURRENT_ACCOUNT" ]] || { echo "❌ Account mismatch (expected $ACCOUNT_ID, running $CURRENT_ACCOUNT)"; continue; }
-  [[ "$INSTANCE_ID" =~ ^i-[a-f0-9]+$ ]] || { echo "❌ Invalid InstanceId"; continue; }
-  [[ "$RETENTION" =~ ^[0-9]+$ ]] || { echo "❌ RetentionDays must be numeric"; continue; }
+  [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "❌ Invalid AccountId"; exit 1; }
+  [[ "$ACCOUNT_ID" == "$CURRENT_ACCOUNT" ]] || { echo "❌ Account mismatch"; exit 1; }
+  [[ "$INSTANCE_ID" =~ ^i-[a-f0-9]+$ ]] || { echo "❌ Invalid InstanceId"; exit 1; }
+  [[ "$RETENTION" =~ ^[0-9]+$ ]] || { echo "❌ RetentionDays must be numeric"; exit 1; }
 
-  aws ec2 describe-instances \
+  if ! aws ec2 describe-instances \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --query "Reservations[].Instances[].InstanceId" \
-    --output text &>/dev/null || { echo "❌ Instance not found"; continue; }
+    --output text >/tmp/inst.out 2>/tmp/inst.err; then
+      echo "❌ AWS error while describing instance:"
+      cat /tmp/inst.err
+      exit 1
+  fi
 
-  # ---------------- Instance Name ----------------
   INSTANCE_NAME="$(aws ec2 describe-instances \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
@@ -93,7 +143,7 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
     continue
   fi
 
-  # ---------------- Create AMI (NO REBOOT) ----------------
+  # ---------------- CREATE AMI ----------------
   AMI_ID="$(aws ec2 create-image \
     --region "$REGION" \
     --instance-id "$INSTANCE_ID" \
@@ -103,7 +153,11 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
     --query ImageId \
     --output text)"
 
-  # ---------------- Tag AMI ----------------
+  [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && { echo "❌ AMI creation failed"; exit 1; }
+
+  echo "🆕 AMI creation started: $AMI_ID"
+
+  # ---------------- TAG AMI ----------------
   aws ec2 create-tags \
     --region "$REGION" \
     --resources "$AMI_ID" \
@@ -115,10 +169,14 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
       Key=CreatedBy,Value=AMI-Automation \
       Key=CreatedOn,Value="$(date +"%d-%m-%Y %H:%M")"
 
-  echo "✅ AMI Created: $AMI_ID"
+  # ---------------- WAIT & VALIDATE ----------------
+  if ! wait_for_ami "$AMI_ID" "$REGION"; then
+    echo "❌ AMI validation failed for instance $INSTANCE_ID"
+    exit 1
+  fi
 
 done < "$CONFIG_FILE"
 
 echo "====================================================="
-echo "AMI creation completed @ $(date)"
+echo "AMI creation completed successfully @ $(date)"
 echo "====================================================="
