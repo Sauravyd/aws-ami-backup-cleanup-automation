@@ -1,0 +1,19 @@
+# ==================================================================================
+# AWS AMI CONFIG FORMAT (STRICT – 5 FIELDS ONLY)
+# ==================================================================================
+# Field1 : AccountId
+# Field2 : Region
+# Field3 : EC2 InstanceId
+# Field4 : RetentionDays (numeric only)
+# Field5 : BackupReason (free text)
+# ==================================================================================
+# Notes:
+# - Comma (,) separated values
+# - Spaces around commas DO NOT matter
+# - Lines starting with # are ignored
+# - Empty lines are ignored
+# - Instance will NOT reboot (NoReboot enforced)
+# ==================================================================================
+
+# EXAMPLE
+881892164822,us-east-1,i-0bbc889ced72fd3d4,3,Before_Patching

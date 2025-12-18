@@ -1,0 +1,8 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 10:27:55 IST 2025
+Mode   : dry-run
+Region : us-east-1
+=====================================================
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+ValueError: Invalid isoformat string: 'ami-037a0952ee71a75ad'

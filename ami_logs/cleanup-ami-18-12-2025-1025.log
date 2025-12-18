@@ -1,0 +1,6 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 10:25:53 IST 2025
+Mode   : dry-run
+Region : us-east-1
+=====================================================
+./aws_ami_cleanup.sh: line 51: gdate: command not found

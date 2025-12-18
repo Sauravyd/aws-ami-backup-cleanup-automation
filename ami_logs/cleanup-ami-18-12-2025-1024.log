@@ -1,0 +1,8 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 10:24:05 IST 2025
+Mode   : dry-run
+Region : us-east-1
+=====================================================
+./aws_ami_cleanup.sh: line 33: mapfile: command not found
+Exception ignored on flushing sys.stdout:
+BrokenPipeError: [Errno 32] Broken pipe

@@ -1,0 +1,16 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 10:45:45 IST 2025
+Mode   : dry-run
+Region : us-east-1
+=====================================================
+
+=====================================================
+SUMMARY:
+Total AMIs scanned        : 0
+Skipped (no AutomatedBackup tag) : 0
+Skipped (invalid RetentionDays)  : 0
+Skipped (not yet expired)        : 0
+AMIs eligible for cleanup        : 0
+=====================================================
+ℹ️ RESULT: No AMIs found eligible for deletion in this run.
+AMI cleanup completed @ Thu Dec 18 10:45:46 IST 2025

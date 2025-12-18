@@ -1,0 +1,19 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 10:35:46 IST 2025
+Mode   : run
+Region : us-east-1
+=====================================================
+-----------------------------------------------------
+AMI           : ami-037a0952ee71a75ad
+Age (days)    : 0
+RetentionDays : 0
+{
+    "Return": true,
+    "DeleteSnapshotResults": []
+}
+✅ Deregistered AMI: ami-037a0952ee71a75ad
+🗑 Deleted snapshot: snap-0245c376bf4529006
+🗑 Deleted snapshot: snap-0a38de6d53bc1f3d2
+=====================================================
+AMI cleanup completed @ Thu Dec 18 10:35:55 IST 2025
+=====================================================

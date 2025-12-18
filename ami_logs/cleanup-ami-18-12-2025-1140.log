@@ -1,0 +1,17 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 11:40:29 IST 2025
+Mode   : run
+Region : us-east-1
+=====================================================
+SKIP ami-0d9dd6589f652682b → Age 0 < RetentionDays 3
+
+=====================================================
+SUMMARY:
+Total AMIs scanned                 : 1
+Skipped (no AutomatedBackup tag)   : 0
+Skipped (invalid RetentionDays)    : 0
+Skipped (not yet expired)          : 1
+AMIs eligible for cleanup          : 0
+=====================================================
+ℹ️ RESULT: No AMIs found eligible for deletion in this run.
+AMI cleanup completed @ Thu Dec 18 11:40:36 IST 2025

@@ -1,0 +1,14 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 10:32:31 IST 2025
+Mode   : dry-run
+Region : us-east-1
+=====================================================
+-----------------------------------------------------
+AMI           : ami-037a0952ee71a75ad
+Age (days)    : 0
+RetentionDays : 0
+🟡 DRY-RUN: Would deregister AMI and delete snapshots
+Snapshots: snap-0245c376bf4529006	snap-0a38de6d53bc1f3d2
+=====================================================
+AMI cleanup completed @ Thu Dec 18 10:32:37 IST 2025
+=====================================================

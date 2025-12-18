@@ -1,0 +1,14 @@
+=====================================================
+Starting AMI creation @ Thu Dec 18 11:36:17 IST 2025
+Mode       : run
+Config     : serverlist.txt
+Log file   : ./ami_logs/create-ami-18-12-2025-1136.log
+=====================================================
+-----------------------------------------------------
+Processing line 19 → i-0bbc889ced72fd3d4 (us-east-1)
+AMI Name      : snapshot-test-ec2-Before_Patching-18-12-2025-1136-automated-ami
+RetentionDays : 3
+✅ AMI Created: ami-0d9dd6589f652682b
+=====================================================
+AMI creation completed @ Thu Dec 18 11:36:23 IST 2025
+=====================================================

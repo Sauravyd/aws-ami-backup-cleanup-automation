@@ -1,0 +1,27 @@
+=====================================================
+Starting AMI cleanup @ Thu Dec 18 11:26:39 IST 2025
+Mode   : run
+Region : us-east-1
+=====================================================
+-----------------------------------------------------
+ELIGIBLE AMI  : ami-04ec24f72f5b85a95
+Age (days)    : 0
+RetentionDays : 0
+{
+    "Return": true,
+    "DeleteSnapshotResults": []
+}
+✅ Deregistered AMI: ami-04ec24f72f5b85a95
+🗑 Deleted snapshot: snap-0185eba483c7a8bc6
+🗑 Deleted snapshot: snap-0c966e96a505cdd62
+
+=====================================================
+SUMMARY:
+Total AMIs scanned        : 0
+Skipped (no AutomatedBackup tag) : 0
+Skipped (invalid RetentionDays)  : 0
+Skipped (not yet expired)        : 0
+AMIs eligible for cleanup        : 0
+=====================================================
+ℹ️ RESULT: No AMIs found eligible for deletion in this run.
+AMI cleanup completed @ Thu Dec 18 11:26:49 IST 2025
