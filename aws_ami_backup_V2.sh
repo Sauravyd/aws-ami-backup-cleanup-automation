@@ -21,10 +21,7 @@ TIME_TAG="$(date +%H%M)"
 # ---------------- ROLE MAP ----------------
 declare -A ROLE_MAP
 
-# MAIN ACCOUNT (Jenkins runs here)
-ROLE_MAP["881892164822"]="arn:aws:iam::881892164822:role/Jenkins-AMICrossAccountExecutor"
-
-# TEST / FRIEND ACCOUNT
+# ONLY cross-account roles here
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
 # ---------------- AMI WAIT CONFIG ----------------
@@ -49,14 +46,24 @@ trim() { echo "$1" | xargs; }
 # ---------------- ASSUME ROLE FUNCTION ----------------
 assume_role() {
   local TARGET_ACCOUNT="$1"
-  local ROLE_ARN="${ROLE_MAP[$TARGET_ACCOUNT]}"
+
+  CURRENT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+  # SAME ACCOUNT → use Jenkins credentials (DO NOT assume role)
+  if [[ "$TARGET_ACCOUNT" == "$CURRENT_ACCOUNT" ]]; then
+    echo "ℹ️ Using existing Jenkins credentials for account $TARGET_ACCOUNT"
+    return 0
+  fi
+
+  # CROSS ACCOUNT ONLY
+  local ROLE_ARN="${ROLE_MAP[$TARGET_ACCOUNT]:-}"
 
   [[ -z "$ROLE_ARN" ]] && {
-    echo "❌ No IAM role mapped for account $TARGET_ACCOUNT"
+    echo "❌ No IAM role mapped for cross-account $TARGET_ACCOUNT"
     exit 1
   }
 
-  echo "🔐 Assuming role for account $TARGET_ACCOUNT"
+  echo "🔐 Assuming role for cross-account $TARGET_ACCOUNT"
 
   CREDS=$(aws sts assume-role \
     --role-arn "$ROLE_ARN" \
@@ -68,7 +75,7 @@ assume_role() {
   export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.SecretAccessKey')
   export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')
 
-  echo "✅ Using AWS Account: $(aws sts get-caller-identity --query Account --output text)"
+  echo "✅ Switched to AWS Account: $(aws sts get-caller-identity --query Account --output text)"
 }
 
 # ---------------- AMI WAIT FUNCTION ----------------
@@ -139,10 +146,10 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
   [[ "$INSTANCE_ID" =~ ^i-[a-f0-9]+$ ]] || { echo "❌ Invalid InstanceId"; exit 1; }
   [[ "$RETENTION" =~ ^[0-9]+$ ]] || { echo "❌ RetentionDays must be numeric"; exit 1; }
 
-  # 🔐 Assume role
+  # 🔐 Switch credentials if required
   assume_role "$ACCOUNT_ID"
 
-  # Validate instance exists
+  # Validate instance
   aws ec2 describe-instances \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
