@@ -17,15 +17,10 @@ pipeline {
       choices: ['dry-run', 'run'],
       description: 'Execution mode'
     )
-    string(
-      name: 'REGION',
-      defaultValue: 'us-east-1',
-      description: 'AWS Region'
-    )
   }
 
   environment {
-    AWS_DEFAULT_REGION = "${params.REGION}"
+    AWS_DEFAULT_REGION = 'us-east-1'
   }
 
   stages {
@@ -56,15 +51,14 @@ pipeline {
       }
       steps {
         input message: """
-        ⚠️ MANUAL APPROVAL REQUIRED ⚠️
+⚠️ MANUAL APPROVAL REQUIRED ⚠️
 
-        Action : ${params.ACTION}
-        Mode   : ${params.MODE}
-        Region : ${params.REGION}
+Action : ${params.ACTION}
+Mode   : ${params.MODE}
 
-        This operation will MODIFY AWS resources.
-        Do you want to proceed?
-        """
+This operation will MODIFY AWS resources.
+Do you want to proceed?
+"""
       }
     }
 
@@ -73,7 +67,7 @@ pipeline {
         expression { params.ACTION == 'backup' }
       }
       steps {
-        withAWS(credentials: 'aws-cicd-creds', region: params.REGION) {
+        withAWS(credentials: 'aws-cicd-creds') {
           sh """
             ./aws_ami_backup_V2.sh serverlist.txt ${params.MODE}
           """
@@ -86,9 +80,9 @@ pipeline {
         expression { params.ACTION == 'cleanup' }
       }
       steps {
-        withAWS(credentials: 'aws-cicd-creds', region: params.REGION) {
+        withAWS(credentials: 'aws-cicd-creds') {
           sh """
-            ./aws_ami_cleanup_V2.sh ${params.MODE} ${params.REGION}
+            ./aws_ami_cleanup_V2.sh serverlist.txt ${params.MODE}
           """
         }
       }
