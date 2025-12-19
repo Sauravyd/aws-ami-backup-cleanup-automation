@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# create_ami_v2.sh – Hardened AWS AMI Automation (WITH STATUS VALIDATION)
+# aws_ami_backup_V2.sh – Cross-Account AMI Backup Automation
 # ==============================================================================
 # Config format:
 # AccountId , Region , EC2_InstanceId , RetentionDays , BackupReason
-#
-# AMI Name:
-# instance_name-BackupReason-DD-MM-YYYY-HHMM-automated-ami
 #
 # Modes:
 #   dry-run
@@ -21,9 +18,13 @@ MODE="${2:-dry-run}"
 DATE_TAG="$(date +%d-%m-%Y)"
 TIME_TAG="$(date +%H%M)"
 
+# ---------------- ROLE MAP ----------------
+declare -A ROLE_MAP
+ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
+
 # ---------------- AMI WAIT CONFIG ----------------
-AMI_POLL_INTERVAL=30          # seconds
-AMI_MAX_WAIT_TIME=3600        # 1 hour max wait
+AMI_POLL_INTERVAL=30
+AMI_MAX_WAIT_TIME=3600
 
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
@@ -40,11 +41,35 @@ echo "====================================================="
 
 trim() { echo "$1" | xargs; }
 
+# ---------------- ASSUME ROLE FUNCTION ----------------
+assume_role() {
+  local TARGET_ACCOUNT="$1"
+  local ROLE_ARN="${ROLE_MAP[$TARGET_ACCOUNT]}"
+
+  [[ -z "$ROLE_ARN" ]] && {
+    echo "❌ No IAM role mapped for account $TARGET_ACCOUNT"
+    exit 1
+  }
+
+  echo "🔐 Assuming role for account $TARGET_ACCOUNT"
+
+  CREDS=$(aws sts assume-role \
+    --role-arn "$ROLE_ARN" \
+    --role-session-name "ami-backup-$(date +%s)" \
+    --query 'Credentials' \
+    --output json)
+
+  export AWS_ACCESS_KEY_ID=$(echo "$CREDS" | jq -r '.AccessKeyId')
+  export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.SecretAccessKey')
+  export AWS_SESSION_TOKEN=$(echo "$CREDS" | jq -r '.SessionToken')
+
+  echo "✅ Using AWS Account: $(aws sts get-caller-identity --query Account --output text)"
+}
+
 # ---------------- AMI WAIT FUNCTION ----------------
 wait_for_ami() {
   local ami_id="$1"
   local region="$2"
-
   local waited=0
 
   echo "⏳ Waiting for AMI to become AVAILABLE: $ami_id"
@@ -69,12 +94,12 @@ wait_for_ami() {
         echo "⏳ AMI still pending... (${waited}s elapsed)"
         ;;
       *)
-        echo "⚠️ Unknown AMI state '$state' for $ami_id"
+        echo "⚠️ Unknown AMI state '$state'"
         ;;
     esac
 
     if (( waited >= AMI_MAX_WAIT_TIME )); then
-      echo "❌ Timeout waiting for AMI $ami_id after ${AMI_MAX_WAIT_TIME}s"
+      echo "❌ Timeout waiting for AMI $ami_id"
       return 1
     fi
 
@@ -86,8 +111,6 @@ wait_for_ami() {
 # ---------------- VALIDATIONS ----------------
 [[ -f "$CONFIG_FILE" ]] || { echo "❌ Config file not found"; exit 1; }
 
-CURRENT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
-
 LINE_NO=0
 
 while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
@@ -98,29 +121,28 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
 
   IFS=',' read -r f1 f2 f3 f4 f5 <<< "$LINE"
 
-  ACCOUNT_ID="$(trim "${f1:-}")"
-  REGION="$(trim "${f2:-}")"
-  INSTANCE_ID="$(trim "${f3:-}")"
-  RETENTION="$(trim "${f4:-}")"
-  REASON="$(trim "${f5:-}")"
+  ACCOUNT_ID="$(trim "$f1")"
+  REGION="$(trim "$f2")"
+  INSTANCE_ID="$(trim "$f3")"
+  RETENTION="$(trim "$f4")"
+  REASON="$(trim "$f5")"
 
   echo "-----------------------------------------------------"
-  echo "Processing line $LINE_NO → $INSTANCE_ID ($REGION)"
+  echo "Line $LINE_NO → Account $ACCOUNT_ID | Instance $INSTANCE_ID"
 
   [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]] || { echo "❌ Invalid AccountId"; exit 1; }
-  [[ "$ACCOUNT_ID" == "$CURRENT_ACCOUNT" ]] || { echo "❌ Account mismatch"; exit 1; }
   [[ "$INSTANCE_ID" =~ ^i-[a-f0-9]+$ ]] || { echo "❌ Invalid InstanceId"; exit 1; }
   [[ "$RETENTION" =~ ^[0-9]+$ ]] || { echo "❌ RetentionDays must be numeric"; exit 1; }
 
-  if ! aws ec2 describe-instances \
+  # 🔐 Assume role
+  assume_role "$ACCOUNT_ID"
+
+  # Validate instance
+  aws ec2 describe-instances \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
     --query "Reservations[].Instances[].InstanceId" \
-    --output text >/tmp/inst.out 2>/tmp/inst.err; then
-      echo "❌ AWS error while describing instance:"
-      cat /tmp/inst.err
-      exit 1
-  fi
+    --output text >/dev/null
 
   INSTANCE_NAME="$(aws ec2 describe-instances \
     --region "$REGION" \
@@ -128,7 +150,7 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
     --query "Reservations[].Instances[].Tags[?Key=='Name'].Value | [0]" \
     --output text)"
 
-  [[ "$INSTANCE_NAME" == "None" || -z "$INSTANCE_NAME" ]] && INSTANCE_NAME="$INSTANCE_ID"
+  [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "None" ]] && INSTANCE_NAME="$INSTANCE_ID"
 
   SAFE_INSTANCE="$(echo "$INSTANCE_NAME" | tr ' /' '--')"
   SAFE_REASON="$(echo "$REASON" | tr ' /' '--')"
@@ -153,8 +175,6 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
     --query ImageId \
     --output text)"
 
-  [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && { echo "❌ AMI creation failed"; exit 1; }
-
   echo "🆕 AMI creation started: $AMI_ID"
 
   # ---------------- TAG AMI ----------------
@@ -170,10 +190,7 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
       Key=CreatedOn,Value="$(date +"%d-%m-%Y %H:%M")"
 
   # ---------------- WAIT & VALIDATE ----------------
-  if ! wait_for_ami "$AMI_ID" "$REGION"; then
-    echo "❌ AMI validation failed for instance $INSTANCE_ID"
-    exit 1
-  fi
+  wait_for_ami "$AMI_ID" "$REGION"
 
 done < "$CONFIG_FILE"
 
