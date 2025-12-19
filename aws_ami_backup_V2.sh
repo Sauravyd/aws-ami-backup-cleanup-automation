@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-CONFIG_FILE="${1:-ami_config.txt}"
+CONFIG_FILE="${1:-serverlist.txt}"
 MODE="${2:-dry-run}"
 
 DATE_TAG="$(date +%d-%m-%Y)"
@@ -20,6 +20,11 @@ TIME_TAG="$(date +%H%M)"
 
 # ---------------- ROLE MAP ----------------
 declare -A ROLE_MAP
+
+# MAIN ACCOUNT (Jenkins runs here)
+ROLE_MAP["881892164822"]="arn:aws:iam::881892164822:role/Jenkins-AMICrossAccountExecutor"
+
+# TEST / FRIEND ACCOUNT
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
 # ---------------- AMI WAIT CONFIG ----------------
@@ -137,7 +142,7 @@ while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
   # 🔐 Assume role
   assume_role "$ACCOUNT_ID"
 
-  # Validate instance
+  # Validate instance exists
   aws ec2 describe-instances \
     --region "$REGION" \
     --instance-ids "$INSTANCE_ID" \
