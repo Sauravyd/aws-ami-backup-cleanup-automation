@@ -200,6 +200,12 @@ echo "Skipped (not yet expired)          : $SKIP_NOT_EXPIRED"
 echo "Skipped (assume role / bad input)  : $SKIP_ASSUME_ROLE"
 echo "====================================================="
 
+# 🔔 DRY-RUN WARNING (ADDED IMPROVEMENT)
+if [[ "$MODE" == "dry-run" ]]; then
+  echo
+  echo "⚠️  THIS WAS A DRY RUN – NO RESOURCES WERE DELETED"
+fi
+
 if (( CLEANUP_FAILED > 0 )); then
   echo "❌ Failed resources:"
   for f in "${FAILED_LIST[@]}"; do
