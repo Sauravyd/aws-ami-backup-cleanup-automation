@@ -4,7 +4,7 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
-    timeout(time: 2, unit: 'HOURS')   // 1️⃣ Pipeline timeout
+    timeout(time: 2, unit: 'HOURS') // Pipeline timeout
   }
 
   parameters {
@@ -36,7 +36,8 @@ pipeline {
     stage('Set Build Description') {
       steps {
         script {
-          currentBuild.description = "Action=${params.ACTION}, Mode=${params.MODE}, Region=${params.REGION}"
+          currentBuild.description =
+            "Action=${params.ACTION}, Mode=${params.MODE}, Region=${params.REGION}"
         }
       }
     }
@@ -69,19 +70,66 @@ pipeline {
           cat serverlist_filtered.txt || true
 
           if [ ! -s serverlist_filtered.txt ]; then
-            echo "❌ No matching servers found for REGION=${params.REGION}"
+            echo "No matching servers found for REGION=${params.REGION}"
             exit 1
           fi
         """
       }
     }
 
-    // 🔐 MANUAL APPROVAL (ONLY FOR RUN MODE + MAIN BRANCH)
     stage('Approval') {
       when {
         allOf {
           expression { params.MODE == 'run' }
-          branch 'main'   // 2️⃣ Restrict run mode to main branch
+          branch 'main'
         }
       }
       steps {
+        input message: """
+MANUAL APPROVAL REQUIRED
+
+Action : ${params.ACTION}
+Mode   : ${params.MODE}
+Region : ${params.REGION}
+
+This operation will modify AWS resources.
+Do you want to proceed?
+"""
+      }
+    }
+
+    stage('AMI Backup') {
+      when {
+        expression { params.ACTION == 'backup' }
+      }
+      steps {
+        withAWS(credentials: 'aws-cicd-creds') {
+          sh "./aws_ami_backup_V2.sh serverlist_filtered.txt ${params.MODE}"
+        }
+      }
+    }
+
+    stage('AMI Cleanup') {
+      when {
+        expression { params.ACTION == 'cleanup' }
+      }
+      steps {
+        withAWS(credentials: 'aws-cicd-creds') {
+          sh "./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${params.MODE}"
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "AMI ${params.ACTION} completed successfully"
+    }
+    unstable {
+      echo "AMI ${params.ACTION} completed with partial failures"
+    }
+    failure {
+      echo "AMI ${params.ACTION} failed"
+    }
+  }
+}
