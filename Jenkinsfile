@@ -7,9 +7,21 @@ pipeline {
   }
 
   parameters {
-    choice(name: 'ACTION', choices: ['backup', 'cleanup'], description: 'AMI backup or cleanup')
-    choice(name: 'MODE', choices: ['dry-run', 'run'], description: 'Execution mode')
-    choice(name: 'REGION', choices: ['ALL', 'us-east-1', 'ap-south-1'], description: 'Target region')
+    choice(
+      name: 'ACTION',
+      choices: ['backup', 'cleanup'],
+      description: 'AMI backup or cleanup'
+    )
+    choice(
+      name: 'MODE',
+      choices: ['dry-run', 'run'],
+      description: 'Execution mode'
+    )
+    choice(
+      name: 'REGION',
+      choices: ['ALL', 'us-east-1', 'ap-south-1'],
+      description: 'Target AWS region'
+    )
   }
 
   stages {
@@ -27,60 +39,89 @@ pipeline {
           python3 --version
           jq --version
           chmod +x aws_ami_backup_V2.sh aws_ami_cleanup_V2.sh
+          echo "Workspace contents:"
+          ls -l
         '''
       }
     }
 
     stage('Prepare Config') {
       steps {
-        sh '''
-          if [ "${REGION}" = "ALL" ]; then
+        sh """
+          echo "Selected REGION: ${params.REGION}"
+
+          if [ "${params.REGION}" = "ALL" ]; then
             cp serverlist.txt serverlist_filtered.txt
           else
-            grep -i ",${REGION}," serverlist.txt > serverlist_filtered.txt || true
+            grep -i ",${params.REGION}," serverlist.txt > serverlist_filtered.txt || true
           fi
 
-          echo "Using configuration:"
-          cat serverlist_filtered.txt
-        '''
+          echo "Filtered server list:"
+          cat serverlist_filtered.txt || true
+
+          if [ ! -s serverlist_filtered.txt ]; then
+            echo "❌ No matching servers found for REGION=${params.REGION}"
+            exit 1
+          fi
+        """
       }
     }
 
+    // 🔐 MANUAL APPROVAL (ONLY FOR RUN MODE)
     stage('Approval') {
-      when { expression { params.MODE == 'run' } }
+      when {
+        expression { params.MODE == 'run' }
+      }
       steps {
         input message: """
 ⚠️ MANUAL APPROVAL REQUIRED ⚠️
+
 Action : ${params.ACTION}
 Mode   : ${params.MODE}
 Region : ${params.REGION}
-Proceed?
+
+This operation will MODIFY AWS resources.
+Do you want to proceed?
 """
       }
     }
 
     stage('AMI Backup') {
-      when { expression { params.ACTION == 'backup' } }
+      when {
+        expression { params.ACTION == 'backup' }
+      }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
-          sh "./aws_ami_backup_V2.sh serverlist_filtered.txt ${params.MODE}"
+          sh """
+            ./aws_ami_backup_V2.sh serverlist_filtered.txt ${params.MODE}
+          """
         }
       }
     }
 
     stage('AMI Cleanup') {
-      when { expression { params.ACTION == 'cleanup' } }
+      when {
+        expression { params.ACTION == 'cleanup' }
+      }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
-          sh "./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${params.MODE}"
+          sh """
+            ./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${params.MODE}
+          """
         }
       }
     }
   }
 
   post {
-    success { echo "✅ AMI ${params.ACTION} completed successfully" }
-    unstable { echo "⚠️ AMI ${params.ACTION} completed with partial failures" }
-    failure { echo "❌ AMI ${params.ACTION} failed" }
+    success {
+      echo "✅ AMI ${params.ACTION} completed successfully"
+    }
+    unstable {
+      echo "⚠️ AMI ${params.ACTION} completed with partial failures"
+    }
+    failure {
+      echo "❌ AMI ${params.ACTION} failed"
+    }
   }
 }
