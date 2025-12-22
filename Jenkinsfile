@@ -79,10 +79,7 @@ pipeline {
 
     stage('Approval') {
       when {
-        allOf {
-          expression { params.MODE == 'run' }
-          branch 'main'
-        }
+        expression { params.MODE == 'run' }
       }
       steps {
         input message: """
