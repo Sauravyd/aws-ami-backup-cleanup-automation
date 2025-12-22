@@ -215,6 +215,10 @@ echo "Success   : $SUCCESS"
 echo "Failed    : $FAILED"
 echo "====================================================="
 
+if [[ "$MODE" == "dry-run" ]]; then
+  echo "⚠️ THIS WAS A DRY RUN – NO AMIs WERE CREATED"
+fi
+
 if (( FAILED > 0 )); then
   echo "❌ Failed Resources:"
   for f in "${FAILED_LIST[@]}"; do
