@@ -19,7 +19,7 @@
 881892164822,us-east-1,i-0cf9eae8015252228,0,Before_Patching
 881892164822,ap-south-1,i-02502fb6aae440671,0,test_patch
 782511039777,us-east-1,i-0ecf47760dd4ae33c,0,cross-account-patch
-782511039777 , ap-south-1, i-063362319ba6e58c1, 0, cross-account-patch-mumbai
+782511039777 , ap-south-1, i-07de92894e7cb9d0e, 0, cross-account-patch-mumbai
 
 
 
