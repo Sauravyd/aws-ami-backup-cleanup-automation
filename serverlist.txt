@@ -16,8 +16,8 @@
 # ==================================================================================
 
 # EXAMPLE
-881892164822,us-east-1,i-04d40af75f902382b,0,Before_Patching
-881892164822,ap-south-1,i-0b68164e0584f31b7,0,test_patch
+881892164822,us-east-1,i-0d8fe6c1a9729c01d,0,Before_Patching
+881892164822,ap-south-1,i-0acd378c79ba5b7db,0,test_patch
 782511039777,us-east-1,i-07fd934c97e5c2518,0,cross-account-patch
 782511039777 , ap-south-1, i-03a48a11cfa490d4e, 0, cross-account-patch-mumbai
 
