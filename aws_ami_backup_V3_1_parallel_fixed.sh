@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# aws_ami_backup_V3_1_parallel_fixed.sh
-# Parallel + Cross-Account SAFE AMI Backup Automation
+# aws_ami_backup_V3_2_parallel_slot_based.sh
+# Slot-based Parallel + Cross-Account SAFE AMI Backup Automation
 # ==============================================================================
 
 set -uo pipefail
@@ -58,16 +58,16 @@ assume_role() {
     --output text 2>/dev/null
 }
 
-# ---------------- WAIT FOR AMI (ISOLATED CREDS) ----------------
+# ---------------- WAIT FOR AMI ----------------
 wait_for_ami() {
   local ami_id="$1"
   local region="$2"
-  local cred_prefix="$3"
+  local creds="$3"
   local waited=0
 
   while true; do
     state="$(
-      eval "$cred_prefix aws ec2 describe-images \
+      eval "$creds aws ec2 describe-images \
         --image-ids $ami_id \
         --region $region \
         --query 'Images[0].State' \
@@ -105,15 +105,15 @@ process_instance() {
     return
   fi
 
-  CREDS=$(assume_role "$ACCOUNT_ID") || {
+  CREDS_RAW=$(assume_role "$ACCOUNT_ID") || {
     echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (assume-role failed)" >> "$FAILED_FILE"
     return
   }
 
-  if [[ "$CREDS" == "USE_CURRENT" ]]; then
+  if [[ "$CREDS_RAW" == "USE_CURRENT" ]]; then
     CREDS_ENV=""
   else
-    read AK SK ST <<< "$CREDS"
+    read AK SK ST <<< "$CREDS_RAW"
     CREDS_ENV="AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST"
   fi
 
@@ -190,20 +190,18 @@ echo "====================================================="
 echo "AMI BACKUP STARTED @ $(date)"
 echo "Mode               : $MODE"
 echo "Max Parallel Jobs  : $MAX_PARALLEL_JOBS"
+echo "Parallel Strategy  : SLOT-BASED (wait -n)"
 echo "====================================================="
-
-JOB_COUNT=0
 
 while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
   LINE="$(trim "$RAWLINE")"
   [[ -z "$LINE" || "$LINE" == \#* ]] && continue
 
-  process_instance "$LINE" &
-  ((JOB_COUNT++))
+  while (( $(jobs -r | wc -l) >= MAX_PARALLEL_JOBS )); do
+    wait -n
+  done
 
-  if (( JOB_COUNT % MAX_PARALLEL_JOBS == 0 )); then
-    wait
-  fi
+  process_instance "$LINE" &
 done < "$CONFIG_FILE"
 
 wait
