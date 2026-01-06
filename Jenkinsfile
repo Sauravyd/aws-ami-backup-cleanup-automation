@@ -61,13 +61,13 @@ pipeline {
           echo "Workspace contents:"
           ls -l
 
-          # Safety checks
-          if [ ! -f aws_ami_backup_V3_parallel.sh ]; then
-            echo "❌ aws_ami_backup_V3_parallel.sh not found. Aborting."
+          # HARD SAFETY CHECK — only fixed script allowed
+          if [ ! -f aws_ami_backup_V3_1_parallel_fixed.sh ]; then
+            echo "❌ aws_ami_backup_V3_1_parallel_fixed.sh not found. Aborting."
             exit 1
           fi
 
-          chmod +x aws_ami_backup_V3_parallel.sh aws_ami_cleanup_V2.sh
+          chmod +x aws_ami_backup_V3_1_parallel_fixed.sh aws_ami_cleanup_V2.sh
         '''
       }
     }
@@ -113,18 +113,18 @@ Do you want to proceed?
       }
     }
 
-    stage('AMI Backup (Parallel V3)') {
+    stage('AMI Backup (Parallel V3.1 – Fixed)') {
       when {
         expression { params.ACTION == 'backup' }
       }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
           sh '''
-            echo "############################################"
-            echo "### RUNNING aws_ami_backup_V3_parallel.sh ###"
-            echo "############################################"
+            echo "########################################################"
+            echo "### RUNNING aws_ami_backup_V3_1_parallel_fixed.sh ###"
+            echo "########################################################"
 
-            ./aws_ami_backup_V3_parallel.sh serverlist_filtered.txt ${MODE}
+            ./aws_ami_backup_V3_1_parallel_fixed.sh serverlist_filtered.txt ${MODE}
           '''
         }
       }
