@@ -4,7 +4,7 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
-    timeout(time: 2, unit: 'HOURS') // Pipeline timeout
+    timeout(time: 2, unit: 'HOURS')
   }
 
   parameters {
@@ -23,6 +23,15 @@ pipeline {
       choices: ['ALL', 'us-east-1', 'ap-south-1'],
       description: 'Target AWS region'
     )
+    string(
+      name: 'MAX_PARALLEL_JOBS',
+      defaultValue: '5',
+      description: 'Max parallel AMI jobs (recommended: 2–5)'
+    )
+  }
+
+  environment {
+    MAX_PARALLEL_JOBS = "${params.MAX_PARALLEL_JOBS}"
   }
 
   stages {
@@ -37,7 +46,7 @@ pipeline {
       steps {
         script {
           currentBuild.description =
-            "Action=${params.ACTION}, Mode=${params.MODE}, Region=${params.REGION}"
+            "Action=${params.ACTION}, Mode=${params.MODE}, Region=${params.REGION}, Parallel=${params.MAX_PARALLEL_JOBS}"
         }
       }
     }
@@ -45,12 +54,20 @@ pipeline {
     stage('Validate Environment') {
       steps {
         sh '''
+          set -e
           aws --version
-          python3 --version
           jq --version
-          chmod +x aws_ami_backup_V2.sh aws_ami_cleanup_V2.sh
+
           echo "Workspace contents:"
           ls -l
+
+          # Safety checks
+          if [ ! -f aws_ami_backup_V3_parallel.sh ]; then
+            echo "❌ aws_ami_backup_V3_parallel.sh not found. Aborting."
+            exit 1
+          fi
+
+          chmod +x aws_ami_backup_V3_parallel.sh aws_ami_cleanup_V2.sh
         '''
       }
     }
@@ -70,7 +87,7 @@ pipeline {
           cat serverlist_filtered.txt || true
 
           if [ ! -s serverlist_filtered.txt ]; then
-            echo "No matching servers found for REGION=${params.REGION}"
+            echo "❌ No matching servers found for REGION=${params.REGION}"
             exit 1
           fi
         """
@@ -85,9 +102,10 @@ pipeline {
         input message: """
 MANUAL APPROVAL REQUIRED
 
-Action : ${params.ACTION}
-Mode   : ${params.MODE}
-Region : ${params.REGION}
+Action   : ${params.ACTION}
+Mode     : ${params.MODE}
+Region   : ${params.REGION}
+Parallel : ${params.MAX_PARALLEL_JOBS}
 
 This operation will modify AWS resources.
 Do you want to proceed?
@@ -95,13 +113,19 @@ Do you want to proceed?
       }
     }
 
-    stage('AMI Backup') {
+    stage('AMI Backup (Parallel V3)') {
       when {
         expression { params.ACTION == 'backup' }
       }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
-          sh "./aws_ami_backup_V2.sh serverlist_filtered.txt ${params.MODE}"
+          sh '''
+            echo "############################################"
+            echo "### RUNNING aws_ami_backup_V3_parallel.sh ###"
+            echo "############################################"
+
+            ./aws_ami_backup_V3_parallel.sh serverlist_filtered.txt ${MODE}
+          '''
         }
       }
     }
@@ -120,13 +144,16 @@ Do you want to proceed?
 
   post {
     success {
-      echo "AMI ${params.ACTION} completed successfully"
+      echo "✅ AMI ${params.ACTION} completed successfully"
     }
     unstable {
-      echo "AMI ${params.ACTION} completed with partial failures"
+      echo "⚠️ AMI ${params.ACTION} completed with partial failures"
     }
     failure {
-      echo "AMI ${params.ACTION} failed"
+      echo "❌ AMI ${params.ACTION} failed"
+    }
+    always {
+      cleanWs()
     }
   }
 }
