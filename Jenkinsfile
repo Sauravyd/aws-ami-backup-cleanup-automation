@@ -8,26 +8,10 @@ pipeline {
   }
 
   parameters {
-    choice(
-      name: 'ACTION',
-      choices: ['backup', 'cleanup'],
-      description: 'AMI backup or cleanup'
-    )
-    choice(
-      name: 'MODE',
-      choices: ['dry-run', 'run'],
-      description: 'Execution mode'
-    )
-    choice(
-      name: 'REGION',
-      choices: ['ALL', 'us-east-1', 'ap-south-1'],
-      description: 'Target AWS region'
-    )
-    string(
-      name: 'MAX_PARALLEL_JOBS',
-      defaultValue: '5',
-      description: 'Max parallel AMI jobs (recommended: 2–5)'
-    )
+    choice(name: 'ACTION', choices: ['backup', 'cleanup'], description: 'AMI backup or cleanup')
+    choice(name: 'MODE', choices: ['dry-run', 'run'], description: 'Execution mode')
+    choice(name: 'REGION', choices: ['ALL', 'us-east-1', 'ap-south-1'], description: 'Target AWS region')
+    string(name: 'MAX_PARALLEL_JOBS', defaultValue: '5', description: 'Max parallel AMI jobs (2–5)')
   }
 
   environment {
@@ -36,19 +20,8 @@ pipeline {
 
   stages {
 
-    stage('Checkout Code') {
-      steps {
-        checkout scm
-      }
-    }
-
-    stage('Set Build Description') {
-      steps {
-        script {
-          currentBuild.description =
-            "Action=${params.ACTION}, Mode=${params.MODE}, Region=${params.REGION}, Parallel=${params.MAX_PARALLEL_JOBS}"
-        }
-      }
+    stage('Checkout') {
+      steps { checkout scm }
     }
 
     stage('Validate Environment') {
@@ -58,16 +31,12 @@ pipeline {
           aws --version
           jq --version
 
-          echo "Workspace contents:"
-          ls -l
-
-          # HARD SAFETY CHECK — only fixed script allowed
-          if [ ! -f aws_ami_backup_V3_1_parallel_fixed.sh ]; then
-            echo "❌ aws_ami_backup_V3_1_parallel_fixed.sh not found. Aborting."
+          if [ ! -f aws_ami_backup_V3_2_parallel_slot_based.sh ]; then
+            echo "❌ V3.2 script not found"
             exit 1
           fi
 
-          chmod +x aws_ami_backup_V3_1_parallel_fixed.sh aws_ami_cleanup_V2.sh
+          chmod +x aws_ami_backup_V3_2_parallel_slot_based.sh aws_ami_cleanup_V2.sh
         '''
       }
     }
@@ -75,85 +44,50 @@ pipeline {
     stage('Prepare Config') {
       steps {
         sh """
-          echo "Selected REGION: ${params.REGION}"
-
           if [ "${params.REGION}" = "ALL" ]; then
             cp serverlist.txt serverlist_filtered.txt
           else
             grep -i ",${params.REGION}," serverlist.txt > serverlist_filtered.txt || true
           fi
 
-          echo "Filtered server list:"
-          cat serverlist_filtered.txt || true
-
-          if [ ! -s serverlist_filtered.txt ]; then
-            echo "❌ No matching servers found for REGION=${params.REGION}"
-            exit 1
-          fi
+          [ -s serverlist_filtered.txt ] || exit 1
         """
       }
     }
 
     stage('Approval') {
-      when {
-        expression { params.MODE == 'run' }
-      }
+      when { expression { params.MODE == 'run' } }
       steps {
-        input message: """
-MANUAL APPROVAL REQUIRED
-
-Action   : ${params.ACTION}
-Mode     : ${params.MODE}
-Region   : ${params.REGION}
-Parallel : ${params.MAX_PARALLEL_JOBS}
-
-This operation will modify AWS resources.
-Do you want to proceed?
-"""
+        input message: "Approve AMI ${params.ACTION} execution?"
       }
     }
 
-    stage('AMI Backup (Parallel V3.1 – Fixed)') {
-      when {
-        expression { params.ACTION == 'backup' }
-      }
+    stage('AMI Backup (V3.2 Slot-Based)') {
+      when { expression { params.ACTION == 'backup' } }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
           sh '''
-            echo "########################################################"
-            echo "### RUNNING aws_ami_backup_V3_1_parallel_fixed.sh ###"
-            echo "########################################################"
-
-            ./aws_ami_backup_V3_1_parallel_fixed.sh serverlist_filtered.txt ${MODE}
+            echo "### RUNNING aws_ami_backup_V3_2_parallel_slot_based.sh ###"
+            ./aws_ami_backup_V3_2_parallel_slot_based.sh serverlist_filtered.txt ${MODE}
           '''
         }
       }
     }
 
     stage('AMI Cleanup') {
-      when {
-        expression { params.ACTION == 'cleanup' }
-      }
+      when { expression { params.ACTION == 'cleanup' } }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
-          sh "./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${params.MODE}"
+          sh "./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${MODE}"
         }
       }
     }
   }
 
   post {
-    success {
-      echo "✅ AMI ${params.ACTION} completed successfully"
-    }
-    unstable {
-      echo "⚠️ AMI ${params.ACTION} completed with partial failures"
-    }
-    failure {
-      echo "❌ AMI ${params.ACTION} failed"
-    }
-    always {
-      cleanWs()
-    }
+    always { cleanWs() }
+    success { echo "✅ Pipeline completed successfully" }
+    unstable { echo "⚠️ Pipeline completed with warnings" }
+    failure { echo "❌ Pipeline failed" }
   }
 }
