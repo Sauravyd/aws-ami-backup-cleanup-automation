@@ -27,7 +27,9 @@ AMI_MAX_WAIT_TIME=900   # 15 minutes max per AMI
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
-exec > >(tee -a "$LOGFILE") 2>&1
+
+# ❗ FIX #2: remove tee (Jenkins-safe logging)
+exec >> "$LOGFILE" 2>&1
 
 # ---------------- RESULT FILES ----------------
 WORKDIR="/tmp/ami_parallel_$$"
@@ -35,13 +37,15 @@ mkdir -p "$WORKDIR"
 SUCCESS_FILE="$WORKDIR/success.txt"
 FAILED_FILE="$WORKDIR/failed.txt"
 
-# ---------------- CLEANUP ON ABORT ----------------
+# ---------------- CLEANUP ON ABORT ONLY ----------------
 cleanup() {
-  echo "⚠️ Pipeline aborted. Killing background jobs..."
-  kill $(jobs -p) 2>/dev/null || true
+  echo "⚠️ Pipeline interrupted. Cleaning up background jobs..."
+  jobs -p | xargs -r kill 2>/dev/null || true
   rm -rf "$WORKDIR"
 }
-trap cleanup EXIT INT TERM
+
+# ❗ FIX #1: DO NOT trap EXIT
+trap cleanup INT TERM
 
 trim() { echo "$1" | xargs; }
 
@@ -238,6 +242,9 @@ echo "====================================================="
 [[ -s "$FAILED_FILE" ]] && cat "$FAILED_FILE"
 
 rm -rf "$WORKDIR"
+
+# ❗ FIX #3: explicit final log
+echo "🎉 All background jobs completed. Exiting script cleanly."
 
 (( FAILED_COUNT > 0 )) && exit 2
 exit 0
