@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # aws_ami_backup_V3_3_parallel_slot_based_stable.sh
-# Parallel AMI Backup – PRODUCTION SAFE
+# Parallel version of V2 logic (SAFE, FAST, PRODUCTION)
 # Skip-per-resource + Fail-at-summary
-# Restored tagging + naming + fast-skip for terminated instances
 # ==============================================================================
 
 set -uo pipefail
@@ -19,16 +18,14 @@ MAX_PARALLEL_JOBS="${MAX_PARALLEL_JOBS:-5}"
 declare -A ROLE_MAP
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
-AMI_POLL_INTERVAL=20
-AMI_MAX_WAIT_TIME=900
+AMI_POLL_INTERVAL=30
+AMI_MAX_WAIT_TIME=1800   # ⏱️ HARD CAP: 30 min per AMI
 
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
 
-# Jenkins console
 exec 3>&1
-# File logging
 exec >>"$LOGFILE" 2>&1
 
 WORKDIR="/tmp/ami_parallel_$$"
@@ -45,7 +42,6 @@ trap cleanup INT TERM
 
 trim() { echo "$1" | xargs; }
 
-# ---------------- ASSUME ROLE ----------------
 assume_role() {
   local TARGET_ACCOUNT="$1"
   local CURRENT_ACCOUNT
@@ -64,7 +60,6 @@ assume_role() {
     --output text 2>/dev/null
 }
 
-# ---------------- WAIT FOR AMI ----------------
 wait_for_ami() {
   local ami_id="$1"
   local region="$2"
@@ -77,8 +72,10 @@ wait_for_ami() {
       --query 'Images[0].State' \
       --output text 2>/dev/null || echo unknown)"
 
-    [[ "$state" == "available" ]] && return 0
-    [[ "$state" == "failed" ]] && return 1
+    case "$state" in
+      available) return 0 ;;
+      failed)    return 1 ;;
+    esac
 
     (( waited >= AMI_MAX_WAIT_TIME )) && return 1
     sleep "$AMI_POLL_INTERVAL"
@@ -86,7 +83,6 @@ wait_for_ami() {
   done
 }
 
-# ---------------- PER INSTANCE ----------------
 process_instance() {
   local LINE_NO="$1"
   local LINE="$2"
@@ -102,87 +98,72 @@ process_instance() {
   echo "Line $LINE_NO → Account $ACCOUNT_ID | Instance $INSTANCE_ID" >&3
 
   CREDS_RAW=$(assume_role "$ACCOUNT_ID") || {
-    echo "❌ Assume role failed — skipping" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (assume-role-failed)" >>"$FAILED_FILE"
+    echo "❌ Assume role failed" >&3
+    echo "$ACCOUNT_ID:$INSTANCE_ID (assume-role)" >>"$FAILED_FILE"
     return
   }
 
-  if [[ "$CREDS_RAW" == "USE_CURRENT" ]]; then
-    echo "ℹ️ Using existing Jenkins credentials for account $ACCOUNT_ID" >&3
-    CREDS_ENV=""
-  else
-    echo "✅ Switched to AWS Account: $ACCOUNT_ID" >&3
+  if [[ "$CREDS_RAW" != "USE_CURRENT" ]]; then
     read AK SK ST <<< "$CREDS_RAW"
-    CREDS_ENV="AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST"
+    export AWS_ACCESS_KEY_ID="$AK"
+    export AWS_SECRET_ACCESS_KEY="$SK"
+    export AWS_SESSION_TOKEN="$ST"
   fi
 
-  INSTANCE_STATE="$(
-    eval "$CREDS_ENV aws ec2 describe-instances \
-      --region $REGION \
-      --instance-ids $INSTANCE_ID \
-      --query 'Reservations[].Instances[].State.Name' \
-      --output text 2>/dev/null"
-  )"
-
-  if [[ -z "$INSTANCE_STATE" || "$INSTANCE_STATE" == "None" ]]; then
-    echo "❌ Instance not found (terminated). Skipping." >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (not-found)" >>"$FAILED_FILE"
-    return
-  fi
+  INSTANCE_STATE=$(aws ec2 describe-instances \
+    --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --query "Reservations[].Instances[].State.Name" \
+    --output text 2>/dev/null)
 
   if [[ ! "$INSTANCE_STATE" =~ ^(running|stopped|stopping)$ ]]; then
-    echo "❌ Invalid state: $INSTANCE_STATE. Skipping." >&3
+    echo "❌ Invalid or missing instance: $INSTANCE_STATE" >&3
     echo "$ACCOUNT_ID:$INSTANCE_ID (state=$INSTANCE_STATE)" >>"$FAILED_FILE"
     return
   fi
 
-  INSTANCE_NAME="$(
-    eval "$CREDS_ENV aws ec2 describe-instances \
-      --region $REGION \
-      --instance-ids $INSTANCE_ID \
-      --query \"Reservations[].Instances[].Tags[?Key=='Name'].Value | [0]\" \
-      --output text 2>/dev/null"
-  )"
+  INSTANCE_NAME="$(aws ec2 describe-instances \
+    --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --query "Reservations[].Instances[].Tags[?Key=='Name'].Value | [0]" \
+    --output text 2>/dev/null)"
+
   [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "None" ]] && INSTANCE_NAME="$INSTANCE_ID"
 
-  SAFE_NAME="$(echo "$INSTANCE_NAME" | tr ' /' '--')"
+  SAFE_INSTANCE="$(echo "$INSTANCE_NAME" | tr ' /' '--')"
   SAFE_REASON="$(echo "$REASON" | tr ' /' '--')"
-  AMI_NAME="${SAFE_NAME}-${SAFE_REASON}-${DATE_TAG}-${TIME_TAG}-automated-ami"
+  AMI_NAME="${SAFE_INSTANCE}-${SAFE_REASON}-${DATE_TAG}-${TIME_TAG}-automated-ami"
 
   if [[ "$MODE" == "dry-run" ]]; then
-    echo "ℹ️ DRY RUN – AMI would be created" >&3
+    echo "🟡 DRY RUN – AMI would be created" >&3
     echo "$ACCOUNT_ID:$INSTANCE_ID (dry-run)" >>"$SUCCESS_FILE"
     return
   fi
 
-  AMI_ID="$(
-    eval "$CREDS_ENV aws ec2 create-image \
-      --region $REGION \
-      --instance-id $INSTANCE_ID \
-      --name \"$AMI_NAME\" \
-      --description \"$REASON\" \
-      --no-reboot \
-      --query ImageId \
-      --output text 2>/dev/null"
-  )"
+  AMI_ID=$(aws ec2 create-image \
+    --region "$REGION" \
+    --instance-id "$INSTANCE_ID" \
+    --name "$AMI_NAME" \
+    --description "$REASON" \
+    --no-reboot \
+    --query ImageId \
+    --output text 2>/dev/null)
 
-  [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && {
+  if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
     echo "❌ AMI creation failed" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (create-image-failed)" >>"$FAILED_FILE"
+    echo "$ACCOUNT_ID:$INSTANCE_ID (create-image)" >>"$FAILED_FILE"
     return
-  }
+  fi
 
-  eval "$CREDS_ENV aws ec2 create-tags \
-    --region $REGION \
-    --resources $AMI_ID \
+  aws ec2 create-tags \
+    --region "$REGION" \
+    --resources "$AMI_ID" \
     --tags \
-      Key=Name,Value=\"$AMI_NAME\" \
+      Key=Name,Value="$AMI_NAME" \
       Key=AutomatedBackup,Value=true \
-      Key=RetentionDays,Value=\"$RETENTION\" \
-      Key=BackupReason,Value=\"$REASON\" \
-      Key=SourceInstanceId,Value=\"$INSTANCE_ID\" \
-      Key=CreatedBy,Value=AMI-Automation \
-      Key=CreatedOn,Value=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" || true
+      Key=RetentionDays,Value="$RETENTION" \
+      Key=BackupReason,Value="$REASON" \
+      Key=CreatedBy,Value=AMI-Automation || true
 
   if wait_for_ami "$AMI_ID" "$REGION"; then
     echo "✅ AMI SUCCESS: $AMI_ID" >&3
@@ -193,7 +174,6 @@ process_instance() {
   fi
 }
 
-# ========================= MAIN =========================
 echo "Starting AMI creation @ $(date)" >&3
 echo "Mode       : $MODE" >&3
 echo "Config     : $CONFIG_FILE" >&3
@@ -228,8 +208,7 @@ echo "Success   : $SUCCESS_COUNT" >&3
 echo "Failed    : $FAILED_COUNT" >&3
 echo "=====================================================" >&3
 
-[[ "$MODE" == "dry-run" ]] && \
-echo "ℹ️ DRY RUN completed — no AMIs were created" >&3
+[[ "$MODE" == "dry-run" ]] && echo "⚠️ THIS WAS A DRY RUN – NO AMIs WERE CREATED" >&3
 
 rm -rf "$WORKDIR"
 
