@@ -2,7 +2,7 @@
 # ==============================================================================
 # aws_ami_backup_V3_3_parallel_slot_based_stable.sh
 # Parallel version of V2 logic (SAFE, FAST, PRODUCTION)
-# Skip-per-resource + Fail-at-summary
+# HARD GUARD: AMI is created ONLY if InstanceId is explicitly provided
 # ==============================================================================
 
 set -uo pipefail
@@ -19,7 +19,7 @@ declare -A ROLE_MAP
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
 AMI_POLL_INTERVAL=30
-AMI_MAX_WAIT_TIME=1800   # ⏱️ HARD CAP: 30 min per AMI
+AMI_MAX_WAIT_TIME=1800   # 30 min hard cap
 
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
@@ -42,6 +42,7 @@ trap cleanup INT TERM
 
 trim() { echo "$1" | xargs; }
 
+# ---------------- ASSUME ROLE ----------------
 assume_role() {
   local TARGET_ACCOUNT="$1"
   local CURRENT_ACCOUNT
@@ -60,6 +61,7 @@ assume_role() {
     --output text 2>/dev/null
 }
 
+# ---------------- WAIT FOR AMI ----------------
 wait_for_ami() {
   local ami_id="$1"
   local region="$2"
@@ -83,6 +85,7 @@ wait_for_ami() {
   done
 }
 
+# ---------------- PER INSTANCE ----------------
 process_instance() {
   local LINE_NO="$1"
   local LINE="$2"
@@ -96,6 +99,13 @@ process_instance() {
 
   echo "-----------------------------------------------------" >&3
   echo "Line $LINE_NO → Account $ACCOUNT_ID | Instance $INSTANCE_ID" >&3
+
+  # 🔒 HARD GUARD — INSTANCE ID MUST BE EXPLICIT
+  if [[ -z "$INSTANCE_ID" || ! "$INSTANCE_ID" =~ ^i-[a-f0-9]{8,}$ ]]; then
+    echo "❌ Invalid or missing InstanceId — SKIPPING (SAFETY BLOCK)" >&3
+    echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (invalid-instance-id)" >>"$FAILED_FILE"
+    return
+  fi
 
   CREDS_RAW=$(assume_role "$ACCOUNT_ID") || {
     echo "❌ Assume role failed" >&3
@@ -117,7 +127,7 @@ process_instance() {
     --output text 2>/dev/null)
 
   if [[ ! "$INSTANCE_STATE" =~ ^(running|stopped|stopping)$ ]]; then
-    echo "❌ Invalid or missing instance: $INSTANCE_STATE" >&3
+    echo "❌ Instance not found or invalid state: $INSTANCE_STATE — skipping" >&3
     echo "$ACCOUNT_ID:$INSTANCE_ID (state=$INSTANCE_STATE)" >>"$FAILED_FILE"
     return
   fi
@@ -149,11 +159,11 @@ process_instance() {
     --query ImageId \
     --output text 2>/dev/null)
 
-  if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
+  [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && {
     echo "❌ AMI creation failed" >&3
     echo "$ACCOUNT_ID:$INSTANCE_ID (create-image)" >>"$FAILED_FILE"
     return
-  fi
+  }
 
   aws ec2 create-tags \
     --region "$REGION" \
@@ -174,6 +184,7 @@ process_instance() {
   fi
 }
 
+# ========================= MAIN =========================
 echo "Starting AMI creation @ $(date)" >&3
 echo "Mode       : $MODE" >&3
 echo "Config     : $CONFIG_FILE" >&3
