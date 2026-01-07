@@ -2,6 +2,7 @@
 # ==============================================================================
 # aws_ami_backup_V3_3_parallel_slot_based_stable.sh
 # Slot-based Parallel + Cross-Account SAFE AMI Backup Automation (STABLE)
+# Jenkins-console summary compatible
 # ==============================================================================
 
 set -uo pipefail
@@ -19,17 +20,20 @@ MAX_PARALLEL_JOBS="${MAX_PARALLEL_JOBS:-5}"
 declare -A ROLE_MAP
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
-# ---------------- AMI WAIT CONFIG (FAIL-FAST) ----------------
+# ---------------- AMI WAIT CONFIG ----------------
 AMI_POLL_INTERVAL=20
-AMI_MAX_WAIT_TIME=900   # 15 minutes max per AMI
+AMI_MAX_WAIT_TIME=900   # 15 minutes
 
 # ---------------- LOGGING ----------------
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
 
-# ❗ FIX #2: remove tee (Jenkins-safe logging)
-exec >> "$LOGFILE" 2>&1
+# Save original stdout for Jenkins
+exec 3>&1
+
+# Redirect detailed logs to file
+exec >>"$LOGFILE" 2>&1
 
 # ---------------- RESULT FILES ----------------
 WORKDIR="/tmp/ami_parallel_$$"
@@ -37,19 +41,17 @@ mkdir -p "$WORKDIR"
 SUCCESS_FILE="$WORKDIR/success.txt"
 FAILED_FILE="$WORKDIR/failed.txt"
 
-# ---------------- CLEANUP ON ABORT ONLY ----------------
+# ---------------- CLEANUP (ONLY ON ABORT) ----------------
 cleanup() {
-  echo "⚠️ Pipeline interrupted. Cleaning up background jobs..."
+  echo "⚠️ Pipeline interrupted. Killing background jobs..." >&3
   jobs -p | xargs -r kill 2>/dev/null || true
   rm -rf "$WORKDIR"
 }
-
-# ❗ FIX #1: DO NOT trap EXIT
 trap cleanup INT TERM
 
 trim() { echo "$1" | xargs; }
 
-# ---------------- ASSUME ROLE (RETURN CREDS) ----------------
+# ---------------- ASSUME ROLE ----------------
 assume_role() {
   local TARGET_ACCOUNT="$1"
 
@@ -70,40 +72,27 @@ assume_role() {
     --output text 2>/dev/null
 }
 
-# ---------------- WAIT FOR AMI (WITH VISIBILITY) ----------------
+# ---------------- WAIT FOR AMI ----------------
 wait_for_ami() {
   local ami_id="$1"
   local region="$2"
-  local creds="$3"
   local waited=0
 
   while true; do
-    state="$(
-      eval "$creds aws ec2 describe-images \
-        --image-ids $ami_id \
-        --region $region \
-        --query 'Images[0].State' \
-        --output text 2>/dev/null || echo unknown"
-    )"
+    state="$(aws ec2 describe-images \
+      --image-ids "$ami_id" \
+      --region "$region" \
+      --query 'Images[0].State' \
+      --output text 2>/dev/null || echo unknown)"
 
     echo "⏳ Waiting for AMI $ami_id | Region=$region | State=$state | Elapsed=${waited}s"
 
     case "$state" in
-      available)
-        echo "✅ AMI $ami_id is available"
-        return 0
-        ;;
-      failed)
-        echo "❌ AMI $ami_id entered FAILED state"
-        return 1
-        ;;
+      available) return 0 ;;
+      failed)    return 1 ;;
     esac
 
-    if (( waited >= AMI_MAX_WAIT_TIME )); then
-      echo "❌ AMI $ami_id timeout after ${AMI_MAX_WAIT_TIME}s"
-      return 1
-    fi
-
+    (( waited >= AMI_MAX_WAIT_TIME )) && return 1
     sleep "$AMI_POLL_INTERVAL"
     waited=$((waited + AMI_POLL_INTERVAL))
   done
@@ -122,9 +111,7 @@ process_instance() {
 
   echo "▶ Processing $ACCOUNT_ID | $REGION | $INSTANCE_ID"
 
-  if [[ ! "$ACCOUNT_ID" =~ ^[0-9]{12}$ ||
-        ! "$INSTANCE_ID" =~ ^i-[a-f0-9]+$ ||
-        ! "$RETENTION" =~ ^[0-9]+$ ]]; then
+  if [[ ! "$ACCOUNT_ID" =~ ^[0-9]{12}$ || ! "$INSTANCE_ID" =~ ^i-[a-f0-9]+$ ]]; then
     echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (invalid input)" >> "$FAILED_FILE"
     return
   fi
@@ -134,72 +121,31 @@ process_instance() {
     return
   }
 
-  if [[ "$CREDS_RAW" == "USE_CURRENT" ]]; then
-    CREDS_ENV=""
-  else
+  if [[ "$CREDS_RAW" != "USE_CURRENT" ]]; then
     read AK SK ST <<< "$CREDS_RAW"
-    CREDS_ENV="AWS_ACCESS_KEY_ID=$AK AWS_SECRET_ACCESS_KEY=$SK AWS_SESSION_TOKEN=$ST"
+    export AWS_ACCESS_KEY_ID="$AK"
+    export AWS_SECRET_ACCESS_KEY="$SK"
+    export AWS_SESSION_TOKEN="$ST"
   fi
-
-  INSTANCE_STATE="$(
-    eval "$CREDS_ENV aws ec2 describe-instances \
-      --region $REGION \
-      --instance-ids $INSTANCE_ID \
-      --query 'Reservations[].Instances[].State.Name' \
-      --output text 2>/dev/null"
-  )"
-
-  [[ ! "$INSTANCE_STATE" =~ ^(running|stopped|stopping)$ ]] && {
-    echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (state=$INSTANCE_STATE)" >> "$FAILED_FILE"
-    return
-  }
-
-  INSTANCE_NAME="$(
-    eval "$CREDS_ENV aws ec2 describe-instances \
-      --region $REGION \
-      --instance-ids $INSTANCE_ID \
-      --query \"Reservations[].Instances[].Tags[?Key=='Name'].Value | [0]\" \
-      --output text 2>/dev/null"
-  )"
-
-  [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "None" ]] && INSTANCE_NAME="$INSTANCE_ID"
-
-  SAFE_INSTANCE="$(echo "$INSTANCE_NAME" | tr ' /' '--')"
-  SAFE_REASON="$(echo "$REASON" | tr ' /' '--')"
-  AMI_NAME="${SAFE_INSTANCE}-${SAFE_REASON}-${DATE_TAG}-${TIME_TAG}-automated-ami"
 
   if [[ "$MODE" == "dry-run" ]]; then
     echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (dry-run)" >> "$SUCCESS_FILE"
     return
   fi
 
-  AMI_ID="$(
-    eval "$CREDS_ENV aws ec2 create-image \
-      --region $REGION \
-      --instance-id $INSTANCE_ID \
-      --name \"$AMI_NAME\" \
-      --description \"$REASON\" \
-      --no-reboot \
-      --query ImageId \
-      --output text 2>/dev/null"
-  )"
-
-  [[ -z "$AMI_ID" ]] && {
-    echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (create-image failed)" >> "$FAILED_FILE"
-    return
+  AMI_ID="$(aws ec2 create-image \
+    --region "$REGION" \
+    --instance-id "$INSTANCE_ID" \
+    --name "${INSTANCE_ID}-${DATE_TAG}-${TIME_TAG}-automated-ami" \
+    --description "$REASON" \
+    --no-reboot \
+    --query ImageId \
+    --output text 2>/dev/null)" || {
+      echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (create-image failed)" >> "$FAILED_FILE"
+      return
   }
 
-  eval "$CREDS_ENV aws ec2 create-tags \
-    --region $REGION \
-    --resources $AMI_ID \
-    --tags \
-      Key=Name,Value=\"$AMI_NAME\" \
-      Key=AutomatedBackup,Value=true \
-      Key=RetentionDays,Value=$RETENTION \
-      Key=BackupReason,Value=\"$REASON\" \
-      Key=CreatedBy,Value=AMI-Automation" || true
-
-  wait_for_ami "$AMI_ID" "$REGION" "$CREDS_ENV" || {
+  wait_for_ami "$AMI_ID" "$REGION" || {
     echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (ami-timeout)" >> "$FAILED_FILE"
     return
   }
@@ -208,14 +154,13 @@ process_instance() {
 }
 
 # ---------------- MAIN ----------------
-[[ -f "$CONFIG_FILE" ]] || { echo "❌ Config file not found"; exit 1; }
+[[ -f "$CONFIG_FILE" ]] || { echo "❌ Config file not found" >&3; exit 1; }
 
-echo "====================================================="
-echo "AMI BACKUP STARTED @ $(date)"
-echo "Mode               : $MODE"
-echo "Max Parallel Jobs  : $MAX_PARALLEL_JOBS"
-echo "Parallel Strategy  : SLOT-BASED (wait -n)"
-echo "====================================================="
+echo "=====================================================" >&3
+echo "AMI BACKUP STARTED @ $(date)" >&3
+echo "Mode               : $MODE" >&3
+echo "Max Parallel Jobs  : $MAX_PARALLEL_JOBS" >&3
+echo "=====================================================" >&3
 
 while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
   LINE="$(trim "$RAWLINE")"
@@ -232,19 +177,19 @@ wait
 
 SUCCESS_COUNT=$(wc -l < "$SUCCESS_FILE" 2>/dev/null || echo 0)
 FAILED_COUNT=$(wc -l < "$FAILED_FILE" 2>/dev/null || echo 0)
+TOTAL=$((SUCCESS_COUNT + FAILED_COUNT))
 
-echo "====================================================="
-echo "AMI BACKUP SUMMARY"
-echo "Success : $SUCCESS_COUNT"
-echo "Failed  : $FAILED_COUNT"
-echo "====================================================="
-
-[[ -s "$FAILED_FILE" ]] && cat "$FAILED_FILE"
+# ---------------- FINAL SUMMARY (JENKINS VISIBLE) ----------------
+echo "" >&3
+echo "=====================================================" >&3
+echo "AMI BACKUP SUMMARY" >&3
+echo "Total     : $TOTAL" >&3
+echo "Success   : $SUCCESS_COUNT" >&3
+echo "Failed    : $FAILED_COUNT" >&3
+echo "Log file  : $LOGFILE" >&3
+echo "=====================================================" >&3
 
 rm -rf "$WORKDIR"
-
-# ❗ FIX #3: explicit final log
-echo "🎉 All background jobs completed. Exiting script cleanly."
 
 (( FAILED_COUNT > 0 )) && exit 2
 exit 0
