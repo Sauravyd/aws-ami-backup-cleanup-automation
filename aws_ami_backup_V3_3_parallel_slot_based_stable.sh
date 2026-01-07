@@ -3,6 +3,7 @@
 # aws_ami_backup_V3_3_parallel_slot_based_stable.sh
 # Parallel version of V2 logic (SAFE, FAST, PRODUCTION)
 # HARD GUARD: AMI is created ONLY if InstanceId is explicitly provided
+# CLEAR per-line logging (SUCCESS | SKIPPED | FAILED)
 # ==============================================================================
 
 set -uo pipefail
@@ -25,6 +26,7 @@ LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
 
+# Jenkins console + file
 exec 3>&1
 exec >>"$LOGFILE" 2>&1
 
@@ -32,6 +34,7 @@ WORKDIR="/tmp/ami_parallel_$$"
 mkdir -p "$WORKDIR"
 SUCCESS_FILE="$WORKDIR/success.txt"
 FAILED_FILE="$WORKDIR/failed.txt"
+SKIPPED_FILE="$WORKDIR/skipped.txt"
 
 cleanup() {
   echo "⚠️ Pipeline interrupted. Killing background jobs..." >&3
@@ -97,19 +100,21 @@ process_instance() {
   RETENTION="$(trim "$f4")"
   REASON="$(trim "$f5")"
 
-  echo "-----------------------------------------------------" >&3
-  echo "Line $LINE_NO → Account $ACCOUNT_ID | Instance $INSTANCE_ID" >&3
+  echo "=====================================================" >&3
+  echo "[LINE $LINE_NO] ACCOUNT=$ACCOUNT_ID REGION=$REGION INSTANCE=${INSTANCE_ID:-'-'}" >&3
 
-  # 🔒 HARD GUARD — INSTANCE ID MUST BE EXPLICIT
+  # 🔒 HARD GUARD
   if [[ -z "$INSTANCE_ID" || ! "$INSTANCE_ID" =~ ^i-[a-f0-9]{8,}$ ]]; then
-    echo "❌ Invalid or missing InstanceId — SKIPPING (SAFETY BLOCK)" >&3
-    echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (invalid-instance-id)" >>"$FAILED_FILE"
+    echo "STATUS : SKIPPED" >&3
+    echo "REASON : Missing or invalid InstanceId in config file (safety block)" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|missing-instance-id" >>"$SKIPPED_FILE"
     return
   fi
 
   CREDS_RAW=$(assume_role "$ACCOUNT_ID") || {
-    echo "❌ Assume role failed" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (assume-role)" >>"$FAILED_FILE"
+    echo "STATUS : FAILED" >&3
+    echo "REASON : AssumeRole failed" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|assume-role" >>"$FAILED_FILE"
     return
   }
 
@@ -126,9 +131,25 @@ process_instance() {
     --query "Reservations[].Instances[].State.Name" \
     --output text 2>/dev/null)
 
+  if [[ -z "$INSTANCE_STATE" || "$INSTANCE_STATE" == "None" ]]; then
+    echo "STATUS : SKIPPED" >&3
+    echo "REASON : Instance not found (terminated / wrong region)" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|not-found" >>"$SKIPPED_FILE"
+    return
+  fi
+
   if [[ ! "$INSTANCE_STATE" =~ ^(running|stopped|stopping)$ ]]; then
-    echo "❌ Instance not found or invalid state: $INSTANCE_STATE — skipping" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (state=$INSTANCE_STATE)" >>"$FAILED_FILE"
+    echo "STATUS : SKIPPED" >&3
+    echo "REASON : Unsupported instance state ($INSTANCE_STATE)" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|bad-state" >>"$SKIPPED_FILE"
+    return
+  fi
+
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "STATUS : SUCCESS" >&3
+    echo "ACTION : DRY-RUN (AMI would be created)" >&3
+    echo "AMI    : N/A" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SUCCESS|dry-run" >>"$SUCCESS_FILE"
     return
   fi
 
@@ -144,12 +165,6 @@ process_instance() {
   SAFE_REASON="$(echo "$REASON" | tr ' /' '--')"
   AMI_NAME="${SAFE_INSTANCE}-${SAFE_REASON}-${DATE_TAG}-${TIME_TAG}-automated-ami"
 
-  if [[ "$MODE" == "dry-run" ]]; then
-    echo "🟡 DRY RUN – AMI would be created" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (dry-run)" >>"$SUCCESS_FILE"
-    return
-  fi
-
   AMI_ID=$(aws ec2 create-image \
     --region "$REGION" \
     --instance-id "$INSTANCE_ID" \
@@ -160,27 +175,21 @@ process_instance() {
     --output text 2>/dev/null)
 
   [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && {
-    echo "❌ AMI creation failed" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (create-image)" >>"$FAILED_FILE"
+    echo "STATUS : FAILED" >&3
+    echo "REASON : create-image API failed" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|create-image" >>"$FAILED_FILE"
     return
   }
 
-  aws ec2 create-tags \
-    --region "$REGION" \
-    --resources "$AMI_ID" \
-    --tags \
-      Key=Name,Value="$AMI_NAME" \
-      Key=AutomatedBackup,Value=true \
-      Key=RetentionDays,Value="$RETENTION" \
-      Key=BackupReason,Value="$REASON" \
-      Key=CreatedBy,Value=AMI-Automation || true
-
   if wait_for_ami "$AMI_ID" "$REGION"; then
-    echo "✅ AMI SUCCESS: $AMI_ID" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID:$AMI_ID" >>"$SUCCESS_FILE"
+    echo "STATUS : SUCCESS" >&3
+    echo "AMI    : $AMI_ID" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SUCCESS|$AMI_ID" >>"$SUCCESS_FILE"
   else
-    echo "❌ AMI FAILED (timeout): $AMI_ID" >&3
-    echo "$ACCOUNT_ID:$INSTANCE_ID (ami-timeout)" >>"$FAILED_FILE"
+    echo "STATUS : FAILED" >&3
+    echo "REASON : AMI did not reach 'available' within timeout" >&3
+    echo "AMI    : $AMI_ID" >&3
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|ami-timeout" >>"$FAILED_FILE"
   fi
 }
 
@@ -210,12 +219,13 @@ wait
 
 SUCCESS_COUNT=$(wc -l <"$SUCCESS_FILE" 2>/dev/null || echo 0)
 FAILED_COUNT=$(wc -l <"$FAILED_FILE" 2>/dev/null || echo 0)
-TOTAL=$((SUCCESS_COUNT + FAILED_COUNT))
+SKIPPED_COUNT=$(wc -l <"$SKIPPED_FILE" 2>/dev/null || echo 0)
 
 echo "=====================================================" >&3
 echo "AMI BACKUP SUMMARY" >&3
-echo "Total     : $TOTAL" >&3
+echo "Total     : $((SUCCESS_COUNT + FAILED_COUNT + SKIPPED_COUNT))" >&3
 echo "Success   : $SUCCESS_COUNT" >&3
+echo "Skipped   : $SKIPPED_COUNT" >&3
 echo "Failed    : $FAILED_COUNT" >&3
 echo "=====================================================" >&3
 
