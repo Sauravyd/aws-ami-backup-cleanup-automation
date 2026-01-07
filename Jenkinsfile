@@ -2,6 +2,9 @@ pipeline {
   agent any
 
   options {
+    // 🔒 DO NOT DISCARD ANY BUILDS (FOREVER)
+    buildDiscarder(logRotator(numToKeepStr: ''))
+
     timestamps()
     disableConcurrentBuilds()
     timeout(time: 2, unit: 'HOURS')
