@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   options {
-    // 🔒 DO NOT DISCARD ANY BUILDS (FOREVER)
+    // 🔒 Keep all builds forever
     buildDiscarder(logRotator(numToKeepStr: ''))
 
     timestamps()
@@ -38,6 +38,23 @@ pipeline {
   }
 
   stages {
+
+    stage('Initialize Build Metadata') {
+      steps {
+        script {
+          currentBuild.displayName =
+            "#${currentBuild.number} | ${params.ACTION.toUpperCase()} | ${params.MODE} | ${params.REGION}"
+
+          currentBuild.description = """
+Action   : ${params.ACTION}
+Mode     : ${params.MODE}
+Region   : ${params.REGION}
+Parallel : ${params.MAX_PARALLEL_JOBS}
+Script   : aws_ami_backup_V3_3_parallel_slot_based_stable.sh
+""".stripIndent()
+        }
+      }
+    }
 
     stage('Checkout Code') {
       steps {
@@ -113,7 +130,7 @@ Do you want to proceed?
       }
       steps {
         withAWS(credentials: 'aws-cicd-creds') {
-          sh '''
+          sh """
             echo "############################################################"
             echo "### RUNNING aws_ami_backup_V3_3_parallel_slot_based_stable.sh ###"
             echo "############################################################"
@@ -121,7 +138,7 @@ Do you want to proceed?
             ./aws_ami_backup_V3_3_parallel_slot_based_stable.sh \
               serverlist_filtered.txt \
               ${MODE}
-          '''
+          """
         }
       }
     }
