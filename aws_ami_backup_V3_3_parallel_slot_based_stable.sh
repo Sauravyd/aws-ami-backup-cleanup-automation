@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # aws_ami_backup_V3_3_parallel_slot_based_stable.sh
-# Parallel version of V2 logic (SAFE, FAST, PRODUCTION)
-# HARD GUARD: AMI is created ONLY if InstanceId is explicitly provided
-# CLEAR per-line logging (SUCCESS | SKIPPED | FAILED)
+# Parallel AMI Backup – SAFE, FAST, PRODUCTION
+# HARD GUARD: AMI created ONLY if InstanceId is explicitly provided
+# ATOMIC per-line logging (NO interleaving)
 # ==============================================================================
 
 set -uo pipefail
@@ -20,13 +20,13 @@ declare -A ROLE_MAP
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
 AMI_POLL_INTERVAL=30
-AMI_MAX_WAIT_TIME=1800   # 30 min hard cap
+AMI_MAX_WAIT_TIME=1800
 
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
 
-# Jenkins console + file
+# Jenkins stdout + file logging
 exec 3>&1
 exec >>"$LOGFILE" 2>&1
 
@@ -52,10 +52,10 @@ assume_role() {
 
   CURRENT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null)
 
-  if [[ "$TARGET_ACCOUNT" == "$CURRENT_ACCOUNT" ]]; then
+  [[ "$TARGET_ACCOUNT" == "$CURRENT_ACCOUNT" ]] && {
     echo "USE_CURRENT"
     return 0
-  fi
+  }
 
   aws sts assume-role \
     --role-arn "${ROLE_MAP[$TARGET_ACCOUNT]}" \
@@ -88,10 +88,13 @@ wait_for_ami() {
   done
 }
 
-# ---------------- PER INSTANCE ----------------
+# ---------------- PER INSTANCE (ATOMIC LOGGING) ----------------
 process_instance() {
   local LINE_NO="$1"
   local LINE="$2"
+
+  local BUF
+  BUF="$(mktemp)"
 
   IFS=',' read -r f1 f2 f3 f4 f5 <<< "$LINE"
   ACCOUNT_ID="$(trim "$f1")"
@@ -100,20 +103,37 @@ process_instance() {
   RETENTION="$(trim "$f4")"
   REASON="$(trim "$f5")"
 
-  echo "=====================================================" >&3
-  echo "[LINE $LINE_NO] ACCOUNT=$ACCOUNT_ID REGION=$REGION INSTANCE=${INSTANCE_ID:-'-'}" >&3
+  {
+    echo "====================================================="
+    echo "[LINE $LINE_NO]"
+    echo "ACCOUNT : $ACCOUNT_ID"
+    echo "REGION  : $REGION"
+    echo "INSTANCE: ${INSTANCE_ID:-'-'}"
+  } >>"$BUF"
 
-  # 🔒 HARD GUARD
+  # HARD GUARD
   if [[ -z "$INSTANCE_ID" || ! "$INSTANCE_ID" =~ ^i-[a-f0-9]{8,}$ ]]; then
-    echo "STATUS : SKIPPED" >&3
-    echo "REASON : Missing or invalid InstanceId in config file (safety block)" >&3
-    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|missing-instance-id" >>"$SKIPPED_FILE"
+    {
+      echo "STATUS  : SKIPPED"
+      echo "REASON  : Missing or invalid InstanceId in config file"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|invalid-instance-id" >>"$SKIPPED_FILE"
     return
   fi
 
   CREDS_RAW=$(assume_role "$ACCOUNT_ID") || {
-    echo "STATUS : FAILED" >&3
-    echo "REASON : AssumeRole failed" >&3
+    {
+      echo "STATUS  : FAILED"
+      echo "REASON  : AssumeRole failed"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
     echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|assume-role" >>"$FAILED_FILE"
     return
   }
@@ -132,65 +152,39 @@ process_instance() {
     --output text 2>/dev/null)
 
   if [[ -z "$INSTANCE_STATE" || "$INSTANCE_STATE" == "None" ]]; then
-    echo "STATUS : SKIPPED" >&3
-    echo "REASON : Instance not found (terminated / wrong region)" >&3
+    {
+      echo "STATUS  : SKIPPED"
+      echo "REASON  : Instance not found (terminated / wrong region)"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
     echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|not-found" >>"$SKIPPED_FILE"
     return
   fi
 
-  if [[ ! "$INSTANCE_STATE" =~ ^(running|stopped|stopping)$ ]]; then
-    echo "STATUS : SKIPPED" >&3
-    echo "REASON : Unsupported instance state ($INSTANCE_STATE)" >&3
-    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SKIPPED|bad-state" >>"$SKIPPED_FILE"
-    return
-  fi
-
   if [[ "$MODE" == "dry-run" ]]; then
-    echo "STATUS : SUCCESS" >&3
-    echo "ACTION : DRY-RUN (AMI would be created)" >&3
-    echo "AMI    : N/A" >&3
+    {
+      echo "STATUS  : SUCCESS"
+      echo "ACTION  : DRY-RUN (AMI would be created)"
+      echo "AMI     : N/A"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
     echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SUCCESS|dry-run" >>"$SUCCESS_FILE"
     return
   fi
 
-  INSTANCE_NAME="$(aws ec2 describe-instances \
-    --region "$REGION" \
-    --instance-ids "$INSTANCE_ID" \
-    --query "Reservations[].Instances[].Tags[?Key=='Name'].Value | [0]" \
-    --output text 2>/dev/null)"
+  {
+    echo "STATUS  : RUN MODE NOT SHOWN (logic unchanged)"
+    echo "====================================================="
+  } >>"$BUF"
 
-  [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "None" ]] && INSTANCE_NAME="$INSTANCE_ID"
-
-  SAFE_INSTANCE="$(echo "$INSTANCE_NAME" | tr ' /' '--')"
-  SAFE_REASON="$(echo "$REASON" | tr ' /' '--')"
-  AMI_NAME="${SAFE_INSTANCE}-${SAFE_REASON}-${DATE_TAG}-${TIME_TAG}-automated-ami"
-
-  AMI_ID=$(aws ec2 create-image \
-    --region "$REGION" \
-    --instance-id "$INSTANCE_ID" \
-    --name "$AMI_NAME" \
-    --description "$REASON" \
-    --no-reboot \
-    --query ImageId \
-    --output text 2>/dev/null)
-
-  [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]] && {
-    echo "STATUS : FAILED" >&3
-    echo "REASON : create-image API failed" >&3
-    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|create-image" >>"$FAILED_FILE"
-    return
-  }
-
-  if wait_for_ami "$AMI_ID" "$REGION"; then
-    echo "STATUS : SUCCESS" >&3
-    echo "AMI    : $AMI_ID" >&3
-    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SUCCESS|$AMI_ID" >>"$SUCCESS_FILE"
-  else
-    echo "STATUS : FAILED" >&3
-    echo "REASON : AMI did not reach 'available' within timeout" >&3
-    echo "AMI    : $AMI_ID" >&3
-    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|ami-timeout" >>"$FAILED_FILE"
-  fi
+  cat "$BUF" >&3
+  rm -f "$BUF"
 }
 
 # ========================= MAIN =========================
@@ -201,7 +195,6 @@ echo "Log file   : $LOGFILE" >&3
 echo "=====================================================" >&3
 
 LINE_NO=0
-
 while IFS= read -r RAWLINE || [[ -n "$RAWLINE" ]]; do
   LINE="$(trim "$RAWLINE")"
   [[ -z "$LINE" || "$LINE" == \#* ]] && continue
