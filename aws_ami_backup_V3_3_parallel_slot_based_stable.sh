@@ -2,7 +2,7 @@
 # ==============================================================================
 # aws_ami_backup_V3_3_parallel_slot_based_stable.sh
 # Slot-based Parallel + Cross-Account SAFE AMI Backup Automation (STABLE)
-# Jenkins-console summary compatible
+# Jenkins-console summary compatible + DRY-RUN banner
 # ==============================================================================
 
 set -uo pipefail
@@ -29,10 +29,10 @@ LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
 
-# Save original stdout for Jenkins
+# Preserve Jenkins stdout
 exec 3>&1
 
-# Redirect detailed logs to file
+# Redirect detailed logs to file only
 exec >>"$LOGFILE" 2>&1
 
 # ---------------- RESULT FILES ----------------
@@ -128,6 +128,7 @@ process_instance() {
     export AWS_SESSION_TOKEN="$ST"
   fi
 
+  # -------- DRY-RUN HANDLING --------
   if [[ "$MODE" == "dry-run" ]]; then
     echo "$ACCOUNT_ID:$REGION:$INSTANCE_ID (dry-run)" >> "$SUCCESS_FILE"
     return
@@ -188,6 +189,15 @@ echo "Success   : $SUCCESS_COUNT" >&3
 echo "Failed    : $FAILED_COUNT" >&3
 echo "Log file  : $LOGFILE" >&3
 echo "=====================================================" >&3
+
+# ---------------- DRY-RUN FINAL BANNER ----------------
+if [[ "$MODE" == "dry-run" ]]; then
+  echo "-----------------------------------------------------" >&3
+  echo "ℹ️  DRY RUN COMPLETED" >&3
+  echo "ℹ️  No AMIs were created." >&3
+  echo "ℹ️  This execution only validated configuration & permissions." >&3
+  echo "-----------------------------------------------------" >&3
+fi
 
 rm -rf "$WORKDIR"
 
