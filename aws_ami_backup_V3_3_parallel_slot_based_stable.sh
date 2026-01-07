@@ -4,6 +4,7 @@
 # Parallel AMI Backup – SAFE, FAST, PRODUCTION
 # HARD GUARD: AMI created ONLY if InstanceId is explicitly provided
 # ATOMIC per-line logging (NO interleaving)
+# RUN logic fully restored
 # ==============================================================================
 
 set -uo pipefail
@@ -20,13 +21,13 @@ declare -A ROLE_MAP
 ROLE_MAP["782511039777"]="arn:aws:iam::782511039777:role/CrossAccount-AMICleanupRole"
 
 AMI_POLL_INTERVAL=30
-AMI_MAX_WAIT_TIME=1800
+AMI_MAX_WAIT_TIME=1800   # 30 min hard cap
 
 LOGDIR="./ami_logs"
 mkdir -p "$LOGDIR"
 LOGFILE="$LOGDIR/create-ami-${DATE_TAG}-${TIME_TAG}.log"
 
-# Jenkins stdout + file logging
+# Jenkins console + file logging
 exec 3>&1
 exec >>"$LOGFILE" 2>&1
 
@@ -92,7 +93,6 @@ wait_for_ami() {
 process_instance() {
   local LINE_NO="$1"
   local LINE="$2"
-
   local BUF
   BUF="$(mktemp)"
 
@@ -111,7 +111,7 @@ process_instance() {
     echo "INSTANCE: ${INSTANCE_ID:-'-'}"
   } >>"$BUF"
 
-  # HARD GUARD
+  # ---------------- HARD GUARD ----------------
   if [[ -z "$INSTANCE_ID" || ! "$INSTANCE_ID" =~ ^i-[a-f0-9]{8,}$ ]]; then
     {
       echo "STATUS  : SKIPPED"
@@ -164,6 +164,7 @@ process_instance() {
     return
   fi
 
+  # ---------------- DRY RUN ----------------
   if [[ "$MODE" == "dry-run" ]]; then
     {
       echo "STATUS  : SUCCESS"
@@ -178,13 +179,73 @@ process_instance() {
     return
   fi
 
-  {
-    echo "STATUS  : RUN MODE NOT SHOWN (logic unchanged)"
-    echo "====================================================="
-  } >>"$BUF"
+  # ---------------- RUN MODE ----------------
+  INSTANCE_NAME="$(aws ec2 describe-instances \
+    --region "$REGION" \
+    --instance-ids "$INSTANCE_ID" \
+    --query "Reservations[].Instances[].Tags[?Key=='Name'].Value | [0]" \
+    --output text 2>/dev/null)"
 
-  cat "$BUF" >&3
-  rm -f "$BUF"
+  [[ -z "$INSTANCE_NAME" || "$INSTANCE_NAME" == "None" ]] && INSTANCE_NAME="$INSTANCE_ID"
+
+  SAFE_INSTANCE="$(echo "$INSTANCE_NAME" | tr ' /' '--')"
+  SAFE_REASON="$(echo "$REASON" | tr ' /' '--')"
+  AMI_NAME="${SAFE_INSTANCE}-${SAFE_REASON}-${DATE_TAG}-${TIME_TAG}-automated-ami"
+
+  AMI_ID=$(aws ec2 create-image \
+    --region "$REGION" \
+    --instance-id "$INSTANCE_ID" \
+    --name "$AMI_NAME" \
+    --description "$REASON" \
+    --no-reboot \
+    --query ImageId \
+    --output text 2>/dev/null)
+
+  if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
+    {
+      echo "STATUS  : FAILED"
+      echo "REASON  : create-image API failed"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|create-image" >>"$FAILED_FILE"
+    return
+  fi
+
+  aws ec2 create-tags \
+    --region "$REGION" \
+    --resources "$AMI_ID" \
+    --tags \
+      Key=Name,Value="$AMI_NAME" \
+      Key=AutomatedBackup,Value=true \
+      Key=RetentionDays,Value="$RETENTION" \
+      Key=BackupReason,Value="$REASON" \
+      Key=CreatedBy,Value=AMI-Automation || true
+
+  if wait_for_ami "$AMI_ID" "$REGION"; then
+    {
+      echo "STATUS  : SUCCESS"
+      echo "AMI     : $AMI_ID"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|SUCCESS|$AMI_ID" >>"$SUCCESS_FILE"
+  else
+    {
+      echo "STATUS  : FAILED"
+      echo "REASON  : AMI did not reach 'available' within timeout"
+      echo "AMI     : $AMI_ID"
+      echo "====================================================="
+    } >>"$BUF"
+
+    cat "$BUF" >&3
+    rm -f "$BUF"
+    echo "$LINE_NO|$ACCOUNT_ID|$REGION|$INSTANCE_ID|FAILED|ami-timeout" >>"$FAILED_FILE"
+  fi
 }
 
 # ========================= MAIN =========================
