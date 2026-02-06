@@ -66,8 +66,13 @@ Script   : aws_ami_backup_V3_3_parallel_slot_based_stable.sh
       steps {
         sh '''
           set -e
+
+          echo "Validating AWS CLI and tools..."
           aws --version
           jq --version
+
+          echo "Verifying AWS identity (IAM Role on Jenkins agent):"
+          aws sts get-caller-identity
 
           echo "Workspace contents:"
           ls -l
@@ -129,17 +134,15 @@ Do you want to proceed?
         expression { params.ACTION == 'backup' }
       }
       steps {
-        withAWS(credentials: 'aws-cicd-creds') {
-          sh """
-            echo "############################################################"
-            echo "### RUNNING aws_ami_backup_V3_3_parallel_slot_based_stable.sh ###"
-            echo "############################################################"
+        sh """
+          echo "############################################################"
+          echo "### RUNNING aws_ami_backup_V3_3_parallel_slot_based_stable.sh ###"
+          echo "############################################################"
 
-            ./aws_ami_backup_V3_3_parallel_slot_based_stable.sh \
-              serverlist_filtered.txt \
-              ${MODE}
-          """
-        }
+          ./aws_ami_backup_V3_3_parallel_slot_based_stable.sh \
+            serverlist_filtered.txt \
+            ${MODE}
+        """
       }
     }
 
@@ -148,9 +151,13 @@ Do you want to proceed?
         expression { params.ACTION == 'cleanup' }
       }
       steps {
-        withAWS(credentials: 'aws-cicd-creds') {
-          sh "./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${MODE}"
-        }
+        sh """
+          echo "############################################################"
+          echo "### RUNNING aws_ami_cleanup_V2.sh ###"
+          echo "############################################################"
+
+          ./aws_ami_cleanup_V2.sh serverlist_filtered.txt ${MODE}
+        """
       }
     }
   }
